@@ -1,5 +1,7 @@
 import os
+import torch
 import random
+import pickle
 import PIL.Image as Image
 import numpy as np
 from config import settings
@@ -18,13 +20,17 @@ class NC_CUB200():
 
     def Set_Session(self, args):
         self.sess = args.sess
-        self.Index_list, self.label = self.Read_Index_Sess()
-        self.len = len(self.Index_list)
-        print(len(self.Index_list))
+        self.img, self.label = self.Read_Index_Sess()
+        self.len = len(self.img)
+        #print(len(self.img))
+
+    def get_data(self):
+        return self.img, self.label
 
     def Read_Index_Sess(self):
         idx = []
         label = []
+        image = []
         f = open(self.IndexDir + '/session_' + str(self.sess + 1) + '.txt', 'r')
         while True:
             lines = f.readline()
@@ -33,29 +39,31 @@ class NC_CUB200():
             id, l = lines.split()
             idx.append(id)
             label.append(int(l)-1)
+
+            img = Image.open(os.path.join(self.Datasets_dir, id))
+            img = np.array(img)
+            if len(img.shape) == 2:
+                img = np.stack([img]*3, 2)
+            image.append(img)
+
         if self.sess>0:
             idx_np = np.array(idx)
             label_np = np.array(label)
-            idx_sample = []
+            img_np = np.array(image)
+
             label_sample = []
+            img_sample = []
+
             cls = np.unique(label)
             for cl in cls:
-                idx_sample = idx_sample + (random.sample(list(idx_np[label_np == cl]), self.K_shot))
+                img_sample = img_sample + (random.sample(list(img_np[label_np == cl]), self.K_shot))
                 label_sample = label_sample + ([cl] * self.K_shot)
-            return idx_sample, label_sample
-        return idx, label
+            return img_sample, label_sample
+        return image, label
 
-    def Random_choose(self):
-        Index = np.random.choice(self.Index_list, 1, replace=False)[0]
-
-        return Index
 
     def load_frame(self, idx):
-        Index = self.Index_list[idx]
-        img = Image.open(os.path.join(self.Datasets_dir, Index))
-        img = np.array(img)
-        if len(img.shape) == 2:
-            img = np.stack([img] * 3, 2)
+        img = self.img[idx]
         img = Image.fromarray(img, mode='RGB')
         Label = self.label[idx]
 
