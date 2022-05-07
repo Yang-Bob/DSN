@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 from models.backbone import Resnet
 from config import settings
 
@@ -12,8 +12,6 @@ class OneModel(nn.Module):
             self.backbone = Resnet.resnet18(pretrained=True)
         else:
             self.backbone = Resnet.resnet18(pretrained=False)
-
-        self.bn = nn.BatchNorm1d(64)
         self.node = 512
 
         if args.dataset == 'CUB200':
@@ -40,44 +38,40 @@ class OneModel(nn.Module):
         self.bce_logits_func = nn.CrossEntropyLoss()
         self.sess = 0
 
-    def get_feature(self, x, trans='normal'):
-        beta = 0.5
-
-        with torch.no_grad():
-            x = self.backbone(x)
-
+    def get_feature(self, x):
+        x = self.backbone(x)
         x = x.view(x.size(0), -1)
-        if trans == 'Tukey':
-            x = torch.pow(x[:, ], beta)
 
         return x
 
-    def forward(self, x, sess=0, epoch=0, Mode='train', IOF='image', trans='normal'):
+    def forward(self, x, sess=0, epoch=0, Mode='train', IOF='image'):
         self.sess = sess
-
         if IOF == 'image':
             if sess > 0:
                 with torch.no_grad():
-                    x = self.get_feature(x, trans)
+                    x = self.get_feature(x)
             else:
-                x = self.backbone(x)
-                x = x.view(x.size(0), -1)
+                x = self.get_feature(x)
 
-        out1 = self.fc1(x)
+        if sess > 0:
+            with torch.no_grad():
+                out1 = self.fc1(x)
+        else:
+            out1 = self.fc1(x)
         out = self._l2norm(out1, dim=1)
         for i in range(sess + 1):
             if i == 0:
-                output = self.fc2(out)
+                output = F.linear(F.normalize(out, p=2, dim=-1), F.normalize(self.fc2.weight, p=2, dim=-1))
             else:
                 fc = eval('self.fc' + str(i + 2))
                 fc_aux = eval('self.fc_aux' + str(i + 2))
-                out_aux = fc_aux(x.view(x.size(0), -1))
-
+                # normalize
+                out_aux = F.linear(F.normalize(x.view(x.size(0), -1), p=2, dim=-1), F.normalize(fc_aux.weight, p=2, dim=-1)) #Change Here
                 if i < sess:
                     out_aux = out_aux * self.Alpha[i]
                 else:
                     if Mode == 'train':
-                        beta = 1.0 + max(epoch - 20, 0)
+                        beta = 1.0 + max(epoch, 0)
                         t = torch.mean(out_aux, dim=0)
                         self.alpha = torch.sigmoid(beta * t)
                         out_aux = out_aux * self.alpha
@@ -88,7 +82,7 @@ class OneModel(nn.Module):
 
                 new_node = out1 * self.gamma + out_aux
                 new_node = self._l2norm(new_node, dim=1)
-                output = torch.cat([output, fc(new_node)], dim=1)  # +out_aux
+                output = torch.cat([output, F.linear(F.normalize(new_node, p=2, dim=-1), F.normalize(fc.weight, p=2, dim=-1))], dim=1)  # +out_aux
 
         return out, output
 
@@ -100,22 +94,17 @@ class OneModel(nn.Module):
         '''Normlize the inp tensor with l2-norm.'''
         return inp / (1e-6 + inp.norm(dim=dim, keepdim=True))
 
-    def get_loss(self, pred, label, output_old=None, logits=None):
+    def get_loss(self, pred, label, output_old=None, logits=None, compression=True):
         loss_bce_seg = self.bce_logits_func(pred, label.long())
         loss_dis = 0
-        loss_cos = 0
         R1 = 0
         if output_old is not None:
             loss_dis = self.distillation_loss(pred, output_old)
-        if logits is not None:
-            out, out_aux = logits
-            cos_loss = nn.CosineEmbeddingLoss()
-            loss_cos = cos_loss(out, out_aux, torch.tensor(-1.0).cuda())  #
-        if self.sess > 0:
+        if self.sess > 0 and compression:
             R1 = torch.sum(nn.ReLU()(torch.norm(self.alpha, p=1, dim=0) / self.node - self.r))
         return loss_bce_seg + loss_dis + 0.1 * R1
 
-    def distillation_loss(self, pred_N, pred_O, T=2):
+    def distillation_loss(self, pred_N, pred_O, T=0.5):
         if pred_N.shape[1] != pred_O.shape[1]:
             pred_N = pred_N[:, :pred_O.shape[1]]
         outputs = torch.log_softmax(pred_N / T, dim=1)  # compute the log of softmax values
