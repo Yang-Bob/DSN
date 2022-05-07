@@ -38,7 +38,7 @@ def get_arguments():
     parser.add_argument("--r", type=float, default=0.1)  # 0.01
     parser.add_argument("--gamma", type=float, default=0.6)  # 0.01
     parser.add_argument("--lamda", type=float, default=1.0)  # 0.01
-    parser.add_argument("--seed", type=str, default='Seed_3')  # 0.01 #Seed_1
+    parser.add_argument("--seed", type=str, default='Seed_1')  # 0.01 #Seed_1
     parser.add_argument("--gpu", type=str, default='5')
     parser.add_argument("--pretrained", type=str, default='False')
     parser.add_argument("--label_num", type=int, default='200')
