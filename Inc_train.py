@@ -2,6 +2,7 @@ import os
 import json
 import argparse
 import time
+import pandas as pd
 import numpy as np
 import copy
 
@@ -12,8 +13,10 @@ from data.LoadData_change import data_loader
 from data.LoadData_change import val_loader
 from models import *
 from utils import Restore
+from utils.Counting import Counting_train
 from exemplar import BatchData
 from exemplar import Exemplar
+from exemplar import Distribution
 from torch.utils.data import DataLoader
 
 import collections
@@ -27,28 +30,38 @@ def get_arguments():
     parser = argparse.ArgumentParser(description='Incremental')
     parser.add_argument("--sesses", type=int, default='10', help='0 is base train, incremental from 1,2,3,...,8')
     parser.add_argument("--start_sess", type=int, default='1')
-    parser.add_argument("--max_epoch", type=int, default='80')  # 180
-    parser.add_argument("--batch_size", type=int, default='120')
-    parser.add_argument("--dataset", type=str, default='CIFAR100')
+    parser.add_argument("--max_epoch", type=int, default='100')  # 180
+    parser.add_argument("--batch_size", type=int, default='128')
+    parser.add_argument("--dataset", type=str, default='CUB200')
     parser.add_argument("--arch", type=str, default='DSN')  #
     parser.add_argument("--lr", type=float, default=0.08)  # 0.005 0.002
     parser.add_argument("--r", type=float, default=0.1)  # 0.01
     parser.add_argument("--gamma", type=float, default=0.6)  # 0.01
     parser.add_argument("--lamda", type=float, default=1.0)  # 0.01
     parser.add_argument("--seed", type=str, default='Seed_3')  # 0.01 #Seed_1
-    parser.add_argument("--gpu", type=str, default='4')
-    parser.add_argument("--newsample_num", type=int, default=2)
+    parser.add_argument("--gpu", type=str, default='5')
     parser.add_argument("--pretrained", type=str, default='False')
+    parser.add_argument("--label_num", type=int, default='200')
+    parser.add_argument("--base_num", type=int, default='100')  # 180
+    parser.add_argument("--inc_len", type=int, default='10')
+    parser.add_argument("--DS", type=str, default='True', help='Distribution Support')
+    parser.add_argument("--delay_estimation", type=int, default='20')
+    parser.add_argument("--delay_testing", type=int, default='3')
+    parser.add_argument("--newsample_num", type=int, default=2)
+    parser.add_argument("--oldsample_num_min", type=int, default=3)
+    parser.add_argument("--basesample_num_min", type=int, default=3)
+    parser.add_argument("--top_k", type=int, default='1')
+    parser.add_argument("--sample_k", type=int, default='1')
     # parser.add_argument("--decay_epoch", nargs='+', type=int, default=[50])
 
     return parser.parse_args()
 
 
-def test(args, network):
+def test(args, network, val_data):
     TP = 0.0
     All = 0.0
-    val_data = val_loader(args)
     network.eval()
+    val_data.dataset.Update_Session(0)
     for i, data in enumerate(val_data):
         img, label = data
         img, label = img.cuda(), label.cuda()
@@ -62,8 +75,7 @@ def test(args, network):
     return acc
 
 
-def test_continue(args, network):
-    val_data = val_loader(args)
+def test_continue(args, network,val_data):
     acc_list = []
     network.eval()
     for sess in range(args.sess + 1):
@@ -73,11 +85,8 @@ def test_continue(args, network):
         for i, data in enumerate(val_data):
             img, label = data
             img, label = img.cuda(), label.cuda()
+            out, output = network(img, args.sess, Mode='test')
 
-            if sess == 0:
-                out, output = network(img, args.sess, Mode='test')
-            else:
-                out, output = network(img, args.sess, Mode='test', trans='Tukey')
             _, pred = torch.max(output, dim=1)
             TP += torch.eq(pred, label).sum().float().item()
             All += torch.eq(label, label).sum().float().item()
@@ -91,7 +100,7 @@ def test_continue(args, network):
 def acc_list2string(acc_list):
     acc_str = ''
     for idx, item in enumerate(acc_list):
-        acc_str += 'Sess%d: %.3f, ' % (idx, item)
+        acc_str += 'Sess%d: %.4f, ' % (idx, item)
 
     return acc_str
 
@@ -104,8 +113,8 @@ def Trans_ACC(args, acc_list):
     if args.dataset == 'miniImageNet':
         SessLen = settings.miniImagenet_SessLen
     ACC = 0
-    ACC_A = 0
-    ACC_M = 0
+    ACC_A = 0 #new session
+    ACC_M = 0 #old session
     num = 0
     for idx, acc in enumerate(acc_list):
         ACC += acc * SessLen[idx]
@@ -125,57 +134,24 @@ def freeze_model(model):
     return model
 
 
-def extract_feature(data_loader, model, trans='normal'):
+def extract_feature(data_loader, model):
     feature_dict = collections.defaultdict(list)
     model.eval()
 
     for i, (x, y) in enumerate(data_loader):
         x = x.cuda()
         y = y.cuda()
-        outputs = model.get_feature(x, trans)
+        with torch.no_grad():
+            outputs = model.get_feature(x)
         tmp = outputs.clone().detach()
-
         for out, label in zip(tmp, y):
             x = out.cpu().numpy()
             feature_dict[label.item()].append(x)
-
     model.train()
     return feature_dict
 
-
-def train(args):
-    if args.dataset == 'CUB200':
-        label_num = 200
-        base_num = 100
-        inc_len = 10
-    if args.dataset == 'CIFAR100':
-        label_num = 100
-        base_num = 60
-        inc_len = 5
-
-    ACC_list = []
-    ACC_list_train = []
-    lr = args.lr
-    network = eval(args.arch).OneModel(args)  # fc:fc1  fw:sess-1 fc
-    network.cuda()
-    network_Old = eval(args.arch).OneModel(args)  # OLD NETWORK
-    network_Old.cuda()
-    optimizer = optim.SGD(network.parameters(), lr=lr, momentum=0.9, weight_decay=0.0005, nesterov=True)
-    print(network)
-
-    log_dir = os.path.join('./log', args.dataset, args.arch, args.seed)
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
-
-    if args.start_sess > 0:
-        Restore.load(args, network, filename='Sess%d' % (args.start_sess - 1) + '.pth.tar')
-        args.sess = args.start_sess - 1
-        ACC = test(args, network)
-        ACC_list.append(ACC)
-        print('Sess: %d' % args.sess, 'acc_val: %f' % ACC)
-
-    # memory
-    exemplar = Exemplar(1, args, label_num, base_num)
+def init_feature_space(args, network):
+    exemplar = Exemplar(args)
     args.sess = 0
     img_train, input_transform = data_loader(args)
     train_x, train_y = img_train.get_data()
@@ -194,70 +170,130 @@ def train(args):
         memory_cov[key] = cov
         base_mean[key] = mean
         base_cov[key] = cov
-
     exemplar.update(memory_mean, memory_cov)
 
-    # statistic var
-    memory_lidx = base_num - inc_len
+    return exemplar, base_mean,base_cov
 
+def update_feature_space(args,network, exemplar, init=False):
+    img_train, img_transform = data_loader(args)
+    train_x, train_y = img_train.get_data()
+    train_loader = DataLoader(BatchData(args, train_x, train_y, input_transform=img_transform), batch_size=128,
+                              shuffle=True, num_workers=8)
+    dataset_len = train_loader.dataset.__len__()
+
+    # new session's distribution init
+    sess_loader = DataLoader(BatchData(args, train_x, train_y, img_transform), batch_size=128, shuffle=True,
+                             num_workers=8)
+    sess_feature = extract_feature(sess_loader, network)
+    train_x = []
+    train_y = []
+    memory_mean = {}
+    memory_cov = {}
+    for key in sess_feature.keys():
+        feature = np.array(sess_feature[key])
+        mean = np.mean(feature, axis=0)
+        cov = np.cov(feature.T)
+        memory_mean[key] = mean
+        memory_cov[key] = cov
+
+        for i in range(len(sess_feature[key])):
+            train_x.append(sess_feature[key][i])
+            train_y.append(key)
+
+    # new session's distribution save
+    exemplar.update(memory_mean, memory_cov)
+    exemplar.memory_lidx = args.base_num + args.inc_len * (args.sess - 1)
+    if init and args.DS=='True':
+        exec('network.fc_aux' + str(args.sess + 2) + '.weight.data.copy_(network.fc1.weight.data)')
+        temp = np.zeros((args.inc_len, 512))
+        for key in memory_mean.keys():
+            temp[key-args.base_num-args.sess*args.inc_len] = memory_mean[key]
+        fea = torch.tensor(temp).cuda().to(torch.float32)
+
+        # initialize classifier
+        fea = network._l2norm(network.fc1(fea), dim=1)
+        exec('network.fc' + str(args.sess + 2) + '.weight.data.copy_(fea.data)')
+
+    return exemplar, train_x, train_y, memory_mean,memory_cov, dataset_len
+
+def train(args):
+    if args.dataset == 'CUB200':
+        args.label_num = 200
+        args.base_num = 100
+        args.inc_len = 10
+    else:
+        args.label_num = 100
+        args.base_num = 60
+        args.inc_len = 5
+
+    ACC_list = []
+
+    lr = args.lr
+    network = eval(args.arch).OneModel(args)  # fc:fc1  fw:sess-1 fc
+
+    network.cuda()
+    network_Old = eval(args.arch).OneModel(args)  # OLD NETWORK
+    network_Old.cuda()
+    best_model = eval(args.arch).OneModel(args)
+    best_model.cuda()
+    # optimizer = optim.SGD(network.parameters(), lr=lr, momentum=0.9, weight_decay=0.0005, nesterov=True)
+    # use following
+    # optimizer = optim.SGD(network.parameters(), lr=lr, momentum=0.9, dampening=0.5, weight_decay=0)
+
+    print(network)
+
+    log_dir = os.path.join('./log', args.dataset, args.arch, args.seed)
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    args.sess = 0
+    val_data = val_loader(args)
+    if args.start_sess > 0:
+        Restore.load(args, network, filename='Sess%d' % (args.start_sess - 1) + '.pth.tar')
+        exemplar, base_mean, base_cov = init_feature_space(args, network)
+        args.sess = args.start_sess - 1
+        ACC = test(args, network, val_data)
+        ACC_list.append(ACC)
+        print('Sess: %d' % args.sess, 'acc_val: %f' % ACC)
+
+    # Initialize feature space
+    begin_time = time.time()
+    best_model.load_state_dict(network.state_dict())
     for sess in range(args.start_sess, args.sesses + 1):
-        Restore.load(args, network, filename='Sess%d' % (sess - 1) + '.pth.tar')
+        args.sess = sess
+        # Restore.load(args, network, filename='Sess%d' % (sess - 1) + '.pth.tar')
+        network.load_state_dict(best_model.state_dict())
         network_Old.load_state_dict(network.state_dict())
         network_Old = freeze_model(network_Old)
         network_Old.eval()
-        args.sess = sess
 
-        img_train, img_transform = data_loader(args)
-        train_x, train_y = img_train.get_data()
-        train_loader = DataLoader(BatchData(args, train_x, train_y, input_transform=img_transform), batch_size=128,
-                                  shuffle=True, num_workers=8)
-        dataset_len = train_loader.dataset.__len__()
+        param_list1 = eval('network.fc'+str(args.sess + 2)+'.parameters()')
+        param_list2 = eval('network.fc_aux'+str(args.sess + 2)+'.parameters()')
+        optimizer = optim.SGD([{"params":param_list1},{"params":param_list2}], lr=lr, momentum=0.9, dampening=0.5, weight_decay=0)
 
-        # statistic var update
-        memory_lidx = memory_lidx + inc_len
-
-        # new session's distribution init
-        sess_loader = DataLoader(BatchData(args, train_x, train_y, img_transform), batch_size=128, shuffle=True,
-                                 num_workers=8)
-        sess_feature = extract_feature(sess_loader, network, 'Tukey')
-        train_x = []
-        train_y = []
-        memory_mean = {}
-        memory_cov = {}
-        best_mean = {}
-        best_cov = {}
-        for key in sess_feature.keys():
-            feature = np.array(sess_feature[key])
-            mean = np.mean(feature, axis=0)
-            cov = np.cov(feature.T)
-            memory_mean[key] = mean
-            memory_cov[key] = cov
-
-            for i in range(len(sess_feature[key])):
-                train_x.append(sess_feature[key][i])
-                train_y.append(key)
-
-        # new session's distribution save
-        exemplar.update(memory_mean, memory_cov)
-
+        # Update feature space
+        exemplar, train_x, train_y,memory_mean,memory_cov, dataset_len = update_feature_space(args,network, exemplar,True)
         Best_ACC = 0
-        loss_list = []
-        begin_time = time.time()
+
         for epoch in range(args.max_epoch):
-            # memory sample
-            train_xs, train_ys = exemplar.get_exemplar_train(memory_lidx)
-            print(len(train_ys))
-            train_xs.extend(train_x)
-            train_ys.extend(train_y)
+            if epoch % args.delay_estimation == 0:
+                exemplar, train_x, train_y, memory_mean, memory_cov, dataset_len = update_feature_space(args, network, exemplar)
+            if args.DS=='True':
+                # memory sample
+                if epoch % args.delay_estimation==0: #delay updating samples
+                    train_xs, train_ys = exemplar.get_exemplar_train()
+                    print(len(train_ys))
+                    train_xs.extend(train_x)
+                    train_ys.extend(train_y)
+            else:
+                train_xs = train_x
+                train_ys = train_y
 
             train_loader = DataLoader(BatchData(args, train_xs, train_ys, input_transform=None, IOF='feature'),
                                       batch_size=args.batch_size, shuffle=True, num_workers=8)
 
             # statistic
-            all_label = torch.zeros(20)
-            hit_label = torch.zeros(20)
-            alpha_cov = collections.defaultdict(list)
-            alpha_sample = collections.defaultdict(list)
+            distribution = Distribution()
+            counting_train = Counting_train(args)
 
             if epoch in decay_epoch:
                 for param_group in optimizer.param_groups:
@@ -273,7 +309,7 @@ def train(args):
                 label_new = torch.zeros(0).long().cuda()
 
                 for i in range(len(label_tmp)):
-                    if (label_tmp[i].item() < memory_lidx) and (label_tmp[i].item() >= 0):
+                    if (label_tmp[i].item() < exemplar.memory_lidx) and (label_tmp[i].item() >= 0):
                         img_old = torch.cat([img_old, img_tmp[i].unsqueeze(dim=0)], dim=0)
                         label_old = torch.cat([label_old, label_tmp[i]], dim=0)
                     else:
@@ -282,134 +318,85 @@ def train(args):
 
                 label_tmp = torch.cat([label_old, label_new], dim=0)
                 label = torch.abs(label_tmp)
+                img = torch.cat([img_old, img_new], dim=0)
 
-                flag_old = True
-                flag_new = True
-
-                if label_new.shape[0] != 0:
-                    _, output_new = network(img_new, args.sess, epoch, IOF='feature')
-                    with torch.no_grad():
-                        _, outputold_new = network_Old(img_new, args.sess - 1, epoch, Mode='test', IOF='feature')
-                    _, pred_new = torch.max(output_new, dim=1)
-                    flag_new = False
-
-                if label_old.shape[0] != 0:
-                    _, output_old = network(img_old, args.sess, epoch, Mode='train', IOF='feature')
-                    with torch.no_grad():
-                        _, outputold_old = network_Old(img_old, args.sess - 1, epoch, Mode='test', IOF='feature')
-                    _, pred_old = torch.max(output_old, dim=1)
-                    flag_old = False
-
-                if flag_old:
-                    output_old = torch.empty(0, output_new.shape[1]).cuda()
-                    outputold_old = torch.empty(0, outputold_new.shape[1]).cuda()
-                    pred_old = torch.zeros(0).long().cuda()
-
-                if flag_new:
-                    output_new = torch.empty(0, output_old.shape[1]).cuda()
-                    outputold_new = torch.empty(0, outputold_old.shape[1]).cuda()
-                    pred_new = torch.zeros(0).long().cuda()
-
-                output = torch.cat([output_old, output_new], dim=0)
-                outputold = torch.cat([outputold_old, outputold_new], dim=0)
-                pred = torch.cat([pred_old, pred_new], dim=0)
-
-                loss = network.get_loss(output, label, outputold.detach())
+                # _, output = network(img, args.sess, epoch, IOF='feature')
+                # Change Here
+                Compression=True
+                if img_new.shape[0] != 0:
+                    _, output_newimg = network(img_new, args.sess, epoch, IOF='feature')
+                    output = output_newimg
+                if img_old.shape[0] != 0:
+                    _, output_oldimg = network(img_old, args.sess, epoch, Mode='test', IOF='feature')
+                    if img_new.shape[0] == 0:
+                        output = output_oldimg
+                        Compression=False
+                    else:
+                        output = torch.cat([output_oldimg, output_newimg], dim=0)
+                #
+                with torch.no_grad():
+                    _, outputold= network_Old(img, args.sess - 1, epoch, Mode='test', IOF='feature')
+                _, pred = torch.max(output, dim=1)
+                loss = network.get_loss(16.0*output, label, 16.0*outputold.detach(), compression=Compression)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 network.finish_train()
-
                 # statistic
-                for k in range(len(pred)):
-                    if label[k].item() < base_num:
-                        k_idx = 0
-                    else:
-                        k_idx = (label[k].item() - base_num) // inc_len + 1
+                if args.DS=='True':
+                    distribution.statistic(args, pred, label, label_tmp, output, exemplar.memory_lidx)
+                counting_train.count(pred, label)
 
-                    all_label[k_idx] = all_label[k_idx] + 1
-                    if pred[k].item() == label[k].item():
-                        hit_label[k_idx] = hit_label[k_idx] + 1
 
-                    # calculate cov's alpha and sample strategy
-                    if (k_idx == sess) and (label_tmp[k].item() >= 0):
-                        x = output[k].clone().detach()
-                        tmp = torch.zeros(base_num + 1)
-                        tmp[:base_num] = x[:base_num]
-                        tmp[base_num] = x[label[k].item()]
-                        tmp = torch.softmax(tmp, dim=0)
-                        alpha_cov[label[k].item()].append(tmp.cpu().numpy())
+            # Updating distribution statistic
+            if args.DS=='True':
+                # statistic cov
+                memory_cov = distribution.statistic_cov(args, exemplar.memory_lidx, memory_cov, base_cov)
+                exemplar.update(memory_mean, memory_cov)
+                # statisitc sample
+                distribution.statisitc_sample(args, exemplar, args.top_k)
 
-                        tmp2 = torch.zeros(memory_lidx + 1)
-                        tmp2[:memory_lidx] = x[:memory_lidx]
-                        tmp2[memory_lidx] = x[label[k].item()]
-                        tmp2 = torch.softmax(tmp2, dim=0)
-                        alpha_sample[label[k].item()].append(tmp2.cpu().numpy())
-
-                acc = torch.eq(pred, label).sum().float().item() / torch.eq(label, label).sum().float().item()
-                all_step = int((dataset_len / args.batch_size))
-                Time = time.time()
-                print('Training--', 'Sess: %d' % args.sess, 'epoch: %d' % epoch, 'step: %d/%d' % (i, all_step),
-                      'loss: %f' % loss, 'ACC_val: %f' % ACC, 'acc_train: %f' % acc,
-                      'Time: %f' % ((Time - begin_time) / 60))
-            ACC_Sess = test_continue(args, network)
-            ACC_Sess_str = acc_list2string(ACC_Sess)
-            ACC, ACC_A, ACC_M = Trans_ACC(args, ACC_Sess)
-            loss_list.append(loss.data.item())
-
-            # statistic cov
-            for i in range(memory_lidx, memory_lidx + inc_len):
-                alpha_tmp = np.array(alpha_cov[i])
-                alpha_tmp = np.mean(alpha_tmp, axis=0)
-                # import pdb;pdb.set_trace()
-                memory_cov[i] = memory_cov[i] * alpha_tmp[base_num]
-                for j in range(base_num):
-                    memory_cov[i] = memory_cov[i] + base_cov[j] * alpha_tmp[j]
-
-            exemplar.update(memory_mean, memory_cov)
-
-            # statisitc sample
-            for i in range(memory_lidx, memory_lidx + inc_len):
-                sample_tmp = np.array(alpha_sample[i])
-                sample_tmp = np.mean(sample_tmp, axis=0)
-                sample_val, sample_idx = torch.topk(torch.from_numpy(sample_tmp[:memory_lidx]), 1)
-                for j in range(1):
-                    if sample_val[j] >= max(0, sample_tmp[memory_lidx] - 0.02):
-                        exemplar.p[sample_idx[j]] = exemplar.p[sample_idx[j]] + 1
-
-            Train_ACC_Sess = []
-            for i in range(sess + 1):
-                if all_label[i].long().item() != 0:
-                    tmp = hit_label[i] / all_label[i]
-                    Train_ACC_Sess.append(tmp)
-                else:
-                    Train_ACC_Sess.append(0.0)
-
+            # Train accuracy
+            Train_ACC_Sess = counting_train.get_train_acc()
             Train_ACC_Sess_str = acc_list2string(Train_ACC_Sess)
-            p_st_1 = 'Training--' + ' Sess: %d' % args.sess + ' epoch: %d' % epoch + '                  ' + '%s' % Train_ACC_Sess_str
+
+            # information
+            Time = time.time()
+            p_st_1 = 'Training--' + ' Sess: %d' % args.sess + ' epoch: %d' % epoch + '                  ' + '%s' % Train_ACC_Sess_str+ ' Time cost: %.2fm ' %((Time - begin_time)/60)
             print(p_st_1)
 
-            p_st_2 = 'Testing--' + ' Sess: %d' % args.sess + ' epoch: %d' % epoch + ' acc_val: %f' % ACC + ' %s' % ACC_Sess_str + '\n'
+            # Test accuracy
+            if epoch>=0:#args.max_epoch/args.delay_testing:
+                ACC_Sess = test_continue(args, network, val_data)
+            else:
+                ACC_Sess=[0]*(args.sess+1)
+            ACC_Sess_str = acc_list2string(ACC_Sess)
+            ACC, ACC_A, ACC_M = Trans_ACC(args, ACC_Sess)
+
+            # information
+            Time = time.time()
+            p_st_2 = 'Testing--' + ' Sess: %d' % args.sess + ' epoch: %d' % epoch + ' acc_val: %f' % ACC + ' %s' % ACC_Sess_str + ' Time cost: %.2fm ' %((Time - begin_time)/60)+ '\n'
             print(p_st_2)
 
             '''if (ACC > Best_ACC) and (ACC_A >= 0.2):'''
-            if ACC_A > ACC_M:
-                if Best_ACC <= ACC:
-                    Best_ACC = ACC
-                    Best_st = p_st_2
-                    best_mean = memory_mean
-                    best_cov = memory_cov
-                    Restore.save_model(args, network, filename='.pth.tar')
+            if Best_ACC <= ACC:
+                Best_ACC = ACC
+                Best_st = p_st_2
+                best_mean = memory_mean
+                best_cov = memory_cov
+                Restore.save_model(args, network, filename='.pth.tar')
+                best_model.load_state_dict(network.state_dict())
 
         network.finish_train()
         # Restore.save_model(args, network, filename='.pth.tar')
         with open(log_dir + '/log' + args.gpu + '.txt', 'a') as file_obj:
             file_obj.write(Best_st)
 
-        ACC_list.append(ACC)
-        ACC_list_train.append(acc)
+        ACC_list.append(Best_ACC)
+        Best_ACC_Sess_str = acc_list2string(ACC_list)
+        print('best acc:%s' %Best_ACC_Sess_str)
         exemplar.update(best_mean, best_cov)
-        args.max_epoch = args.max_epoch + 10
+#         args.max_epoch = args.max_epoch + 10
 
     timestamp = time.strftime("%m%d-%H%M", time.localtime())
     print('ACC:', ACC_list)
@@ -421,4 +408,8 @@ if __name__ == '__main__':
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     print('Running parameters:\n')
     print(json.dumps(vars(args), indent=4, separators=(',', ':')))
+    if args.dataset=='CUB200':
+        args.sesses=10
+    else:
+        args.sesses=8
     train(args)
