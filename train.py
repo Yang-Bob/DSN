@@ -13,10 +13,6 @@ from utils import Restore
 from models import *
 from config import settings
 
-# decay_epoch = [60, 100]
-decay_epoch = [120, 160]
-
-
 def get_arguments():
     parser = argparse.ArgumentParser(description='Incremental')
     parser.add_argument("--sesses", type=int, default='0', help='0 is base train, incremental from 1,2,3,...,8')
@@ -28,9 +24,9 @@ def get_arguments():
     parser.add_argument("--r", type=float, default=15)
     parser.add_argument("--gamma", type=float, default=4)
     parser.add_argument("--seed", type=str, default='Seed_3')  # Seed_3
-    parser.add_argument("--gpu", type=str, default='2')  #
-    parser.add_argument("--pretrained", type=bool, default=True)  # 0.01 #Seed_1
-    # parser.add_argument("--decay_epoch", nargs='+', type=int, default=[40,80])
+    parser.add_argument("--gpu", type=str, default='4')  #
+    parser.add_argument("--pretrained", type=bool, default=False)
+    parser.add_argument("--decay_epoch", type=int, nargs='+', default=[80, 120, 160])
 
     return parser.parse_args()
 
@@ -71,7 +67,7 @@ def train(args):
         loss_list = []
         begin_time = time.time()
         for epoch in range(args.max_epoch):
-            if epoch in decay_epoch:
+            if epoch in args.decay_epoch:
                 for param_group in optimizer.param_groups:
                     param_group['lr'] = param_group['lr'] * 0.1
             for i, data in enumerate(train_loader):
@@ -81,7 +77,7 @@ def train(args):
 
                 _, pred = torch.max(output, dim=1)
 
-                loss = network.get_loss(output, label)
+                loss = network.get_loss(16.0*output, label)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -108,6 +104,8 @@ def train(args):
 if __name__ == '__main__':
     args = get_arguments()
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+    if args.dataset == 'CUB200':
+        args.pretrained=True
     print('Running parameters:\n')
     print(json.dumps(vars(args), indent=4, separators=(',', ':')))
     train(args)
