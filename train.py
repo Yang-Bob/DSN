@@ -23,7 +23,7 @@ def get_arguments():
     parser.add_argument("--lr", type=float, default=0.1)  # 0.1
     parser.add_argument("--r", type=float, default=15)
     parser.add_argument("--gamma", type=float, default=4)
-    parser.add_argument("--seed", type=str, default='Seed_3')  # Seed_3
+    parser.add_argument("--seed", type=str, default='Seed_1')  # Seed_3
     parser.add_argument("--gpu", type=str, default='4')  #
     parser.add_argument("--pretrained", type=bool, default=False)
     parser.add_argument("--decay_epoch", type=int, nargs='+', default=[80, 120, 160])
