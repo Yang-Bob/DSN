@@ -20,7 +20,7 @@ miniImagenet_Index_DIR = osp.abspath('./data_list/miniImageNet/Index_list/')
 miniImagenet_Datasets_Dir = osp.abspath('/home/YangBoyu/Dataset/mini_imagenet/images')
 
 # Image Size
-CIFAR_size=32
+CIFAR_size=64
 CUB_size=224
 miniImage_size=84
 
