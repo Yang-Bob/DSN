@@ -30,19 +30,19 @@ def get_arguments():
     parser = argparse.ArgumentParser(description='Incremental')
     parser.add_argument("--sesses", type=int, default='10', help='0 is base train, incremental from 1,2,3,...,8')
     parser.add_argument("--start_sess", type=int, default='1')
-    parser.add_argument("--max_epoch", type=int, default='100')  # 180
+    parser.add_argument("--max_epoch", type=int, default='100')  
     parser.add_argument("--batch_size", type=int, default='128')
     parser.add_argument("--dataset", type=str, default='CUB200')
-    parser.add_argument("--arch", type=str, default='DSN')  #
-    parser.add_argument("--lr", type=float, default=0.08)  # 0.005 0.002
-    parser.add_argument("--r", type=float, default=0.1)  # 0.01
-    parser.add_argument("--gamma", type=float, default=0.6)  # 0.01
-    parser.add_argument("--lamda", type=float, default=1.0)  # 0.01
-    parser.add_argument("--seed", type=str, default='Seed_1')  # 0.01 #Seed_1
+    parser.add_argument("--arch", type=str, default='DSN')  
+    parser.add_argument("--lr", type=float, default=0.08)  
+    parser.add_argument("--r", type=float, default=0.1)  
+    parser.add_argument("--gamma", type=float, default=0.6)  
+    parser.add_argument("--lamda", type=float, default=1.0)  
+    parser.add_argument("--seed", type=str, default='Seed_1')  
     parser.add_argument("--gpu", type=str, default='5')
     parser.add_argument("--pretrained", type=str, default='False')
     parser.add_argument("--label_num", type=int, default='200')
-    parser.add_argument("--base_num", type=int, default='100')  # 180
+    parser.add_argument("--base_num", type=int, default='100')  
     parser.add_argument("--inc_len", type=int, default='10')
     parser.add_argument("--DS", type=str, default='True', help='Distribution Support')
     parser.add_argument("--delay_estimation", type=int, default='20')
@@ -52,7 +52,6 @@ def get_arguments():
     parser.add_argument("--basesample_num_min", type=int, default=3)
     parser.add_argument("--top_k", type=int, default='1')
     parser.add_argument("--sample_k", type=int, default='1')
-    # parser.add_argument("--decay_epoch", nargs='+', type=int, default=[50])
 
     return parser.parse_args()
 
