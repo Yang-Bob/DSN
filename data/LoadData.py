@@ -50,9 +50,11 @@ def data_loader(args):
     if args.dataset == 'miniImageNet':
         img_train = NC_miniImageNet(args, transform=tsfm_train)
 
-    train_loader = DataLoader(img_train, batch_size=batch, shuffle=True, num_workers=8)
-
-    return train_loader
+    if args.sesses >0:
+        return img_train, tsfm_train
+    else:
+        train_loader = DataLoader(img_train, batch_size=batch, shuffle=True, num_workers=8)
+        return train_loader
 
 
 def val_loader(args):
@@ -71,8 +73,8 @@ def val_loader(args):
         mean_vals = settings.mean_vals
         std_vals = settings.std_vals
         tsfm_train = transforms.Compose([  # transforms.ToPILImage(),
-            transforms.Resize(256),
-            transforms.CenterCrop(size),
+            transforms.Resize((256,256)),
+            transforms.CenterCrop((224,224)),
             transforms.ToTensor(),
             transforms.Normalize(mean_vals, std_vals)
         ])
